@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Z-Egress Scan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#101A22;
+  --paper:#E9ECEE;
+  --card:#F6F8F9;
+  --rule:#C3CBD1;
+  --steel:#3C6E92;
+  --recovered:#12796B;   /* what the dictionary wins back */
+  --generic:#8C99A3;     /* what Envoy already gets */
+  --onwire:#B4611F;      /* bytes still being paid for */
+  --dim:#5C6B76;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font:400 14px/1.55 "IBM Plex Mono",ui-monospace,monospace;
+}
+.wrap{max-width:940px;margin:0 auto;padding:40px 22px 90px}
+
+header{border-bottom:2px solid var(--ink);padding-bottom:16px;margin-bottom:34px}
+.brand{font:700 13px/1 "IBM Plex Mono",monospace;letter-spacing:.22em;text-transform:uppercase}
+h1{font:700 clamp(30px,5.5vw,46px)/1.05 "Space Grotesk",system-ui,sans-serif;
+   letter-spacing:-.02em;margin:14px 0 8px}
+.sub{color:var(--dim);max-width:60ch;margin:0}
+
+/* ---- form ---- */
+form{background:var(--card);border:1px solid var(--rule);padding:22px;margin-bottom:34px}
+.row{display:flex;flex-wrap:wrap;gap:18px}
+.field{flex:1 1 190px;min-width:0}
+label{display:block;font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+      color:var(--dim);margin-bottom:7px}
+input,select{width:100%;font:400 14px "IBM Plex Mono",monospace;padding:9px 10px;
+  border:1px solid var(--rule);background:#fff;color:var(--ink);border-radius:0}
+input[type=file]{padding:7px}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--steel);outline-offset:1px}
+.actions{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}
+button{font:600 13px "IBM Plex Mono",monospace;padding:11px 20px;border:1px solid var(--ink);
+  background:var(--ink);color:var(--card);cursor:pointer;border-radius:0;letter-spacing:.04em}
+button.ghost{background:transparent;color:var(--ink)}
+button:hover{background:var(--steel);border-color:var(--steel);color:#fff}
+.err{border:1px solid var(--onwire);border-left-width:4px;background:#fff;
+     padding:12px 14px;margin-bottom:22px;color:var(--onwire)}
+
+/* ---- signature: the wire ---- */
+.wire-block{margin:8px 0 42px}
+.wire-cap{display:flex;justify-content:space-between;font-size:11px;
+  letter-spacing:.13em;text-transform:uppercase;color:var(--dim);margin-bottom:9px}
+.wire{display:flex;height:74px;border:1px solid var(--ink);overflow:hidden}
+.seg{display:flex;align-items:flex-end;padding:7px 9px;font-size:11px;color:#fff;
+  white-space:nowrap;overflow:hidden;
+  animation:grow .75s cubic-bezier(.2,.7,.2,1) both}
+@keyframes grow{from{flex-basis:0}}
+.s-gen{background:var(--generic)}
+.s-extra{background:var(--recovered);animation-delay:.2s}
+.s-left{background:var(--onwire);animation-delay:.4s}
+@media (prefers-reduced-motion:reduce){.seg{animation:none}}
+.legend{display:flex;flex-wrap:wrap;gap:20px;margin-top:12px;font-size:12px;color:var(--dim)}
+.legend i{display:inline-block;width:11px;height:11px;margin-right:7px;vertical-align:-1px}
+
+/* ---- numbers ---- */
+.hero-n{font:700 clamp(38px,8vw,66px)/1 "Space Grotesk",sans-serif;
+        letter-spacing:-.03em;color:var(--recovered)}
+.hero-l{color:var(--dim);font-size:13px;margin-top:4px}
+
+h2{font:600 12px/1 "IBM Plex Mono",monospace;letter-spacing:.19em;text-transform:uppercase;
+   color:var(--dim);border-bottom:1px solid var(--rule);padding-bottom:9px;margin:38px 0 18px}
+table{width:100%;border-collapse:collapse}
+td{padding:9px 0;border-bottom:1px solid var(--rule);vertical-align:baseline}
+td:last-child{text-align:right;font-weight:500}
+.big{font-size:17px;font-weight:600}
+.win{color:var(--recovered)}
+.pale{color:var(--dim)}
+
+.verdict{border:1px solid var(--ink);border-left-width:5px;background:var(--card);
+         padding:18px 20px;margin-top:34px}
+.verdict.good{border-left-color:var(--recovered)}
+.verdict.mid{border-left-color:var(--steel)}
+.verdict.bad{border-left-color:var(--onwire)}
+.verdict h3{font:700 19px/1.2 "Space Grotesk",sans-serif;margin:0 0 7px}
+.verdict p{margin:0;color:var(--dim);max-width:66ch}
+footer{margin-top:52px;padding-top:16px;border-top:1px solid var(--rule);
+       color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand">Z-Egress / scan</div>
+  <h1>Find out what your wire is costing you.</h1>
+  <p class="sub">Upload a sample of your service payloads. We measure what compression
+  can actually recover — on payloads the dictionary has never seen. Read-only:
+  nothing is installed, and nothing touches your data path.</p>
+</header>
+
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+<form method="post" action="/scan" enctype="multipart/form-data">
+  <div class="row">
+    <div class="field">
+      <label for="sample">Payload sample &mdash; JSONL, one per line</label>
+      <input type="file" id="sample" name="sample" accept=".jsonl,.json,.txt">
+    </div>
+    <div class="field">
+      <label for="monthly_gb">Monthly volume on this path (GB)</label>
+      <input type="number" id="monthly_gb" name="monthly_gb" min="1" step="1"
+             value="{{ result.monthly_gb|int if result else 400000 }}">
+    </div>
+    <div class="field">
+      <label for="path">Egress path</label>
+      <select id="path" name="path">
+        <option value="cross-az">Cross-AZ, round trip &mdash; $0.020/GB</option>
+        <option value="nat">NAT Gateway processing &mdash; $0.045/GB</option>
+        <option value="internet">Internet egress &mdash; $0.090/GB</option>
+        <option value="cross-region">Cross-region &mdash; $0.020/GB</option>
+      </select>
+    </div>
+  </div>
+  <div class="actions">
+    <button type="submit">Run scan</button>
+    <button type="submit" name="demo" value="1" class="ghost">Use sample dataset</button>
+  </div>
+</form>
+
+{% if result %}
+  <div class="wire-block">
+    <div class="wire-cap">
+      <span>1 GB leaving your cluster</span>
+      <span>{{ "%.0f"|format(result.seg_left) }}% still billed</span>
+    </div>
+    <div class="wire" role="img"
+         aria-label="Of every gigabyte, {{ '%.0f'|format(result.seg_gen) }} percent is
+         removed by generic zstd, {{ '%.0f'|format(result.seg_extra) }} percent more by a
+         trained dictionary, and {{ '%.0f'|format(result.seg_left) }} percent still crosses the wire.">
+      <div class="seg s-gen"   style="flex:{{ result.seg_gen }} 1 0"><span>generic</span></div>
+      <div class="seg s-extra" style="flex:{{ result.seg_extra }} 1 0"><span>dictionary</span></div>
+      <div class="seg s-left"  style="flex:{{ result.seg_left }} 1 0"><span>on the wire</span></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--generic)"></i>Envoy's free filter removes {{ "%.1f"|format(result.gen_pct) }}%</span>
+      <span><i style="background:var(--recovered)"></i>Dictionary removes {{ "%.1f"|format(result.seg_extra) }}% more</span>
+      <span><i style="background:var(--onwire)"></i>{{ "%.1f"|format(result.seg_left) }}% you keep paying for</span>
+    </div>
+  </div>
+
+  <div class="hero-n">{{ "%.0f"|format(result.headroom) }}%</div>
+  <div class="hero-l">of the bytes Envoy leaves behind, recovered by a dictionary trained
+    on your traffic &nbsp;&middot;&nbsp; dict id {{ result.dict_id }}</div>
+
+  <h2>Measured on {{ "{:,}".format(result.n) }} held-out payloads</h2>
+  <table>
+    <tr><td>Median payload (p50)</td><td>{{ "{:,}".format(result.p50) }} B</td></tr>
+    <tr><td>p90</td><td class="pale">{{ "{:,}".format(result.p90) }} B</td></tr>
+    <tr><td>p99</td><td class="pale">{{ "{:,}".format(result.p99) }} B</td></tr>
+    <tr><td>Generic zstd reduction</td><td>{{ "%.1f"|format(result.gen_pct) }}%</td></tr>
+    <tr><td>Trained dictionary reduction</td><td class="big win">{{ "%.1f"|format(result.dic_pct) }}%</td></tr>
+  </table>
+
+  <h2>{{ result.path_label }} &mdash; ${{ result.price }}/GB</h2>
+  <table>
+    <tr><td>{{ "{:,}".format(result.monthly_gb|int) }} GB/month on this path</td>
+        <td>${{ "{:,.0f}".format(result.bill) }}/mo</td></tr>
+    <tr><td>With Envoy's free filter</td>
+        <td class="pale">&minus;${{ "{:,.0f}".format(result.save_gen) }}/mo</td></tr>
+    <tr><td>With trained dictionaries</td>
+        <td class="win">&minus;${{ "{:,.0f}".format(result.save_dic) }}/mo</td></tr>
+    <tr><td class="big">What the dictionary adds</td>
+        <td class="big win">${{ "{:,.0f}".format(result.delta) }}/mo
+          &nbsp;<span class="pale">(${{ "{:,.0f}".format(result.delta*12) }}/yr)</span></td></tr>
+  </table>
+
+  <div class="verdict {{ result.tone }}">
+    <h3>{{ result.verdict }}</h3>
+    <p>{{ result.note }}</p>
+  </div>
+{% endif %}
+
+<footer>
+  Dictionaries are trained on one half of your sample and measured on the other,
+  so every number here reflects traffic the dictionary has never seen.
+  Your sample is analysed in memory and never written to disk.
+</footer>
+
+</div>
+</body>
+</html>
