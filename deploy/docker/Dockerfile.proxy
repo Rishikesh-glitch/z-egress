@@ -1,0 +1,35 @@
+# Both proxies in one image; the deployment picks which binary to run.
+#
+# Multi-stage on purpose. The build layer carries gcc and headers; the runtime
+# layer carries neither. In a regulated environment every package in the final
+# image is something a scanner will flag and someone will have to justify, so
+# the runtime is kept as close to empty as a dynamically linked C binary allows.
+#
+#   docker build -f deploy/docker/Dockerfile.proxy -t z-egress/proxy:0.1 .
+
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc libc6-dev libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY egress.c ingress.c zx_common.h ./
+# -Werror here and not in the Makefile: a warning that slips through locally
+# should still fail the build that produces a customer artefact.
+RUN gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread egress.c  -o z-egress  -lzstd \
+ && gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread ingress.c -o z-ingress -lzstd \
+ && strip z-egress z-ingress
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libzstd1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -r -u 65532 -s /usr/sbin/nologin zegress \
+ && mkdir -p /dicts && chown zegress:zegress /dicts
+
+COPY --from=build /src/z-egress  /usr/local/bin/z-egress
+COPY --from=build /src/z-ingress /usr/local/bin/z-ingress
+
+USER 65532:65532
+WORKDIR /dicts
+EXPOSE 8080 9090
+ENTRYPOINT ["/usr/local/bin/z-egress"]

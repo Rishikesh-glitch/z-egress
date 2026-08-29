@@ -1,0 +1,20 @@
+# Control plane. Trains, versions and serves dictionaries entirely inside the
+# customer's network. Makes no outbound connections.
+#
+#   docker build -f deploy/docker/Dockerfile.controlplane -t z-egress/controlplane:0.1 .
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir zstandard==0.23.0 \
+ && useradd -r -u 65532 -s /usr/sbin/nologin zxctl \
+ && mkdir -p /zx-state && chown zxctl:zxctl /zx-state
+
+COPY zxctl.py /usr/local/bin/zxctl.py
+
+ENV ZX_HOME=/zx-state
+USER 65532:65532
+WORKDIR /zx-state
+EXPOSE 7373
+
+ENTRYPOINT ["python3", "/usr/local/bin/zxctl.py"]
+CMD ["serve", "--bind", "0.0.0.0", "--port", "7373"]
