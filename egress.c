@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include <zstd.h>
+#include "zx_common.h"
 
 /* ------------------------------------------------------------------ */
 /* Tunables                                                            */
@@ -72,8 +73,29 @@ static unsigned    g_cdict_id = 0;
  * floor drops once a dictionary is loaded. */
 static size_t g_min_compress = MIN_COMPRESS_BYTES;
 
+/* Accepts a file path or an http:// URL pointing at the control plane.
+ * Pulling from the control plane is what makes rotation possible without
+ * rebuilding an image or redeploying a pod. */
 static int load_cdict(const char *path)
 {
+    if (strncmp(path, "http://", 7) == 0) {
+        void *raw = NULL; size_t n = 0;
+        if (zx_http_get(path, &raw, &n) != 0 || n == 0) {
+            fprintf(stderr, "[z-egress] control plane fetch failed: %s\n", path);
+            free(raw);
+            return -1;
+        }
+        g_cdict = ZSTD_createCDict(raw, n, ZSTD_LEVEL);
+        free(raw);                      /* CDict keeps its own copy */
+        if (!g_cdict) return -1;
+        g_cdict_id = ZSTD_getDictID_fromCDict(g_cdict);
+        atomic_store(&zx_dict_id, (unsigned long long)g_cdict_id);
+        g_min_compress = 32;
+        fprintf(stderr, "[z-egress] fetched dictionary %u from control plane\n",
+                g_cdict_id);
+        return 0;
+    }
+
     FILE *fh = fopen(path, "rb");
     if (!fh) { fprintf(stderr, "[z-egress] cannot open %s\n", path); return -1; }
     if (fseek(fh, 0, SEEK_END) != 0) { fclose(fh); return -1; }
@@ -95,6 +117,7 @@ static int load_cdict(const char *path)
     if (!g_cdict) return -1;
 
     g_cdict_id = ZSTD_getDictID_fromCDict(g_cdict);
+    atomic_store(&zx_dict_id, (unsigned long long)g_cdict_id);
     g_min_compress = 32;          /* dictionaries pay off far lower down */
     return 0;
 }
@@ -488,6 +511,7 @@ static void *handle_conn(void *arg)
 
     if (req_parse(&req, inbuf.data, (size_t)hend) != 0) goto cleanup;
     parsed = true;
+    ZX_BUMP(zx_requests);
 
     /* ---- eligibility: every "no" falls through to pass-through ---- */
 
@@ -514,6 +538,7 @@ static void *handle_conn(void *arg)
     if (!eligible) {
         /* Forward verbatim: inbuf still holds the headers AND any body
          * bytes that arrived in the same segment. Send the lot, then pump. */
+        ZX_BUMP(zx_passthrough);
         if (write_all(ufd, inbuf.data, inbuf.len) != 0) goto cleanup;
         pump_bidir(cfd, ufd);
         goto cleanup;
@@ -572,11 +597,16 @@ static void *handle_conn(void *arg)
         if (ZSTD_isError(csize))
             fprintf(stderr, "[z-egress] zstd: %s (passthrough)\n",
                     ZSTD_getErrorName(csize));
+        ZX_BUMP(zx_fallback);
         if (write_all(ufd, inbuf.data, (size_t)hend) != 0) goto cleanup;
         if (write_all(ufd, body.data, body.len) != 0) goto cleanup;
         relay_until_eof(ufd, cfd);
         goto cleanup;
     }
+
+    ZX_BUMP(zx_transformed);
+    ZX_ADD(zx_plain_bytes, body.len);
+    ZX_ADD(zx_wire_bytes, csize);
 
     fprintf(stderr,
             "[z-egress] %s %s  %zu -> %zu B  (%.1f%% saved, dict %u, %.0f us)\n",
@@ -671,9 +701,10 @@ static int make_listener(const char *port)
 
 int main(int argc, char **argv)
 {
-    if (argc < 4 || argc > 5) {
+    if (argc < 4 || argc > 6) {
         fprintf(stderr,
-            "usage: %s <listen_port> <upstream_host> <upstream_port> [dict_file]\n",
+            "usage: %s <listen_port> <upstream_host> <upstream_port> "
+            "[dict_file|http://control-plane/v1/dictionary/<id>] [metrics_port]\n",
             argv[0]);
         return 2;
     }
@@ -684,7 +715,9 @@ int main(int argc, char **argv)
     g_upstream_host = argv[2];
     g_upstream_port = argv[3];
 
-    if (argc == 5 && load_cdict(argv[4]) == 0)
+    zx_start_metrics(argc >= 6 ? atoi(argv[5]) : 0, "egress");
+
+    if (argc >= 5 && load_cdict(argv[4]) == 0)
         fprintf(stderr, "[z-egress] dictionary %u loaded, "
                         "compression floor now %zu B\n",
                 g_cdict_id, g_min_compress);

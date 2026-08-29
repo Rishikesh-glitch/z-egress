@@ -49,6 +49,7 @@
 #include <unistd.h>
 
 #include <zstd.h>
+#include "zx_common.h"
 
 #define PROXY_ENGINE       "Z-Ingress-v0.1"
 #define LISTEN_BACKLOG     512
@@ -78,11 +79,66 @@ typedef struct {
 static dict_entry_t g_dicts[MAX_DICTS];
 static int          g_ndicts = 0;
 
+/* The registry was append-only-at-startup; on-demand fetching makes it mutable
+ * while workers are reading it, so mutation takes this lock. DDicts themselves
+ * are immutable once built, so a reader can take the pointer under the lock and
+ * keep using it after releasing. */
+static pthread_mutex_t g_dict_lock = PTHREAD_MUTEX_INITIALIZER;
+static const char *g_control_plane = NULL;   /* http://host:port, or NULL */
+
 static const ZSTD_DDict *dict_lookup(unsigned id)
 {
+    const ZSTD_DDict *found = NULL;
+    pthread_mutex_lock(&g_dict_lock);
     for (int i = 0; i < g_ndicts; i++)
-        if (g_dicts[i].id == id) return g_dicts[i].ddict;
-    return NULL;
+        if (g_dicts[i].id == id) { found = g_dicts[i].ddict; break; }
+    pthread_mutex_unlock(&g_dict_lock);
+    return found;
+}
+
+/* Ask the control plane for a dictionary we have not seen. This is what turns
+ * a version skew from an outage into a two-second delay: the sender rolls
+ * forward, we notice an unknown id, we fetch it, and traffic keeps flowing. */
+static const ZSTD_DDict *dict_fetch(unsigned id)
+{
+    if (!g_control_plane) return NULL;
+
+    char url[512];
+    snprintf(url, sizeof url, "%s/v1/dictionary/%u", g_control_plane, id);
+
+    void *raw = NULL; size_t n = 0;
+    if (zx_http_get(url, &raw, &n) != 0 || n == 0) { free(raw); return NULL; }
+
+    ZSTD_DDict *dd = ZSTD_createDDict(raw, n);
+    free(raw);
+    if (!dd) return NULL;
+
+    if (ZSTD_getDictID_fromDDict(dd) != id) {   /* control plane served wrong data */
+        ZSTD_freeDDict(dd);
+        return NULL;
+    }
+
+    pthread_mutex_lock(&g_dict_lock);
+    for (int i = 0; i < g_ndicts; i++)          /* another thread may have won */
+        if (g_dicts[i].id == id) {
+            pthread_mutex_unlock(&g_dict_lock);
+            ZSTD_freeDDict(dd);
+            return g_dicts[i].ddict;
+        }
+    if (g_ndicts >= MAX_DICTS) {
+        pthread_mutex_unlock(&g_dict_lock);
+        ZSTD_freeDDict(dd);
+        return NULL;
+    }
+    g_dicts[g_ndicts].id = id;
+    g_dicts[g_ndicts].ddict = dd;
+    snprintf(g_dicts[g_ndicts].name, sizeof g_dicts[g_ndicts].name,
+             "fetched:%u", id);
+    g_ndicts++;
+    pthread_mutex_unlock(&g_dict_lock);
+
+    fprintf(stderr, "[z-ingress] fetched dictionary %u from control plane\n", id);
+    return dd;
 }
 
 /* Read one dictionary file into a DDict and register it under whatever
@@ -434,6 +490,7 @@ static void *handle_conn(void *arg)
     if (hend <= 0) goto cleanup;
     if (req_parse(&req, inbuf.data, (size_t)hend) != 0) goto cleanup;
     parsed = true;
+    ZX_BUMP(zx_requests);
 
     const char *ce = hdr_get(&req, "Content-Encoding");
     const char *cl = hdr_get(&req, "Content-Length");
@@ -452,6 +509,7 @@ static void *handle_conn(void *arg)
 
     if (!is_zstd) {
         /* Not ours to touch: forward byte for byte. */
+        ZX_BUMP(zx_passthrough);
         if (write_all(afd, inbuf.data, inbuf.len) != 0) goto cleanup;
         pump_bidir(cfd, afd);
         goto cleanup;
@@ -480,6 +538,7 @@ static void *handle_conn(void *arg)
 
     if (frame_dict != 0) {
         dd = dict_lookup(frame_dict);
+        if (!dd) dd = dict_fetch(frame_dict);      /* auto-sync before failing */
         if (!dd) {
             /* We cannot decode this. Say so precisely: the sender reads the
              * id back and falls back to generic zstd on the next request.
@@ -487,7 +546,8 @@ static void *handle_conn(void *arg)
             char xh[128];
             snprintf(xh, sizeof xh,
                      "X-Z-Egress-Missing-Dict: %u\r\n", frame_dict);
-            fprintf(stderr, "[z-ingress] unknown dictionary %u — asked sender "
+            ZX_BUMP(zx_fallback);
+            fprintf(stderr, "[z-ingress] unknown dictionary %u - asked sender "
                             "to fall back\n", frame_dict);
             send_status(cfd, "415 Unsupported Media Type", xh,
                         "unknown zstd dictionary id\n");
@@ -516,6 +576,7 @@ static void *handle_conn(void *arg)
         declared > (unsigned long long)body.len * MAX_EXPANSION) {
         fprintf(stderr, "[z-ingress] refused %zu B claiming %llu B expansion\n",
                 body.len, declared);
+        ZX_BUMP(zx_errors);
         send_status(cfd, "413 Payload Too Large", NULL,
                     "decompressed size exceeds limit\n");
         goto cleanup;
@@ -545,9 +606,15 @@ static void *handle_conn(void *arg)
     if (ZSTD_isError(got)) {
         fprintf(stderr, "[z-ingress] decode failed: %s\n",
                 ZSTD_getErrorName(got));
+        ZX_BUMP(zx_errors);
         send_status(cfd, "400 Bad Request", NULL, "zstd decode failed\n");
         goto cleanup;
     }
+
+    ZX_BUMP(zx_transformed);
+    ZX_ADD(zx_plain_bytes, got);
+    ZX_ADD(zx_wire_bytes, body.len);
+    atomic_store(&zx_dict_id, (unsigned long long)frame_dict);
 
     fprintf(stderr, "[z-ingress] %s %s  %zu -> %zu B  (dict %u, %.0f us)\n",
             req.method, req.target, body.len, got, frame_dict, us);
@@ -625,10 +692,10 @@ static int make_listener(const char *port)
 
 int main(int argc, char **argv)
 {
-    if (argc < 4 || argc > 5) {
+    if (argc < 4 || argc > 7) {
         fprintf(stderr,
-            "usage: %s <listen_port> <app_host> <app_port> [dict_dir]\n",
-            argv[0]);
+            "usage: %s <listen_port> <app_host> <app_port> [dict_dir] "
+            "[http://control-plane] [metrics_port]\n", argv[0]);
         return 2;
     }
 
@@ -636,7 +703,13 @@ int main(int argc, char **argv)
 
     g_app_host = argv[2];
     g_app_port = argv[3];
-    dicts_load_dir(argc == 5 ? argv[4] : "./dicts");
+    dicts_load_dir(argc >= 5 ? argv[4] : "./dicts");
+    if (argc >= 6 && strncmp(argv[5], "http://", 7) == 0) {
+        g_control_plane = argv[5];
+        fprintf(stderr, "[z-ingress] control plane %s (auto-fetch enabled)\n",
+                g_control_plane);
+    }
+    zx_start_metrics(argc >= 7 ? atoi(argv[6]) : 0, "ingress");
 
     int lfd = make_listener(argv[1]);
     if (lfd < 0) { perror("[z-ingress] listen"); return 1; }
