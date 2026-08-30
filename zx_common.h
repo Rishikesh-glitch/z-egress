@@ -13,6 +13,10 @@
  * Include after <zstd.h>.
  */
 
+/* Z-Egress — Copyright (C) 2026 Rishikesh
+ * Licensed under the GNU Affero General Public License v3.0.
+ * See LICENSE for terms. */
+
 #ifndef ZX_COMMON_H
 #define ZX_COMMON_H
 
