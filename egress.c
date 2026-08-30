@@ -17,6 +17,9 @@
  * C11 / POSIX.1-2008. Not a production proxy — see the notes at the bottom
  * of the file for what is deliberately out of scope in v0.1.
  */
+/* Z-Egress — Copyright (C) 2026 Rishikesh
+ * Licensed under the GNU Affero General Public License v3.0.
+ * See LICENSE for terms. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
