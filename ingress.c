@@ -23,6 +23,10 @@
  *   ./z-ingress 8081 127.0.0.1     9001    (decompresses)
  */
 
+/* Z-Egress — Copyright (C) 2026 Rishikesh
+ * Licensed under the GNU Affero General Public License v3.0.
+ * See LICENSE for terms. */
+
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 
