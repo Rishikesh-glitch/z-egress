@@ -77,3 +77,5 @@ requests and deliberately malformed input.
 
 Working prototype. Not yet run in production anywhere.
 EOF
+
+The proxies and control plane are AGPL-3.0. Commercial licenses for closed-source use are available — contact r88747000@gmail.com.
