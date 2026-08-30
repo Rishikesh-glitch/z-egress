@@ -31,6 +31,9 @@ Commands:
 Everything lives under ZX_HOME (default ./zx-state).
 """
 
+# Z-Egress — Copyright (C) 2026 Rishikesh
+# Licensed under the GNU Affero General Public License v3.0.
+
 import argparse
 import hashlib
 import json
